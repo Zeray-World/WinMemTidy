@@ -1,2 +1,119 @@
-# WinMemTidy
-A single-file Windows RAM tidier: purges the standby list first, then trims background working sets — and splits "used / standby cache / free" into three honest numbers.
+# 此项目为DSflash1017-higt制作
+# WinMemTidy · 内存整理 加强版
+
+一个单文件 Windows 内存整理工具。不结束任何进程，只做两件事：
+**先清待命列表，再压缩后台进程的工作集**，然后把内存拆成三条独立数字给你看。
+
+纯 Tkinter 实现，Python 标准库 + Win32 API，无第三方依赖，无网络请求，无后台常驻。
+
+<!-- 截图：建议放 docs/screenshot.png -->
+
+---
+
+## 为什么再做一个
+
+市面上同类工具大多只调用 `EmptyWorkingSet`，把进程的工作集"踢"出去就结束了。
+被踢出去的页面并没有离开内存，它们变成了**待命缓存（Standby List）**——
+数字上好看了，物理内存一点没多。
+
+这个工具的做法不一样：
+
+1. **会清待命列表**——通过 `NtSetSystemInformation(SystemMemoryListInformation)`
+   依次刷已修改页、清低优先级待命、清待命列表。多数工具不做这一步。
+2. **动手前先筛**——跳过前台窗口进程、系统关键进程、以及（标准模式下）所有有可见窗口的程序。
+   你正在用的东西不会被压。
+3. **数字拆成三条**——「已用 / 系统缓存 / 纯空闲」各自占多少一目了然。
+   任务管理器里的"可用内存"其实是后两者之和，混在一起看容易误判。
+
+---
+
+## 功能
+
+- **三条独立指标**：已用内存、系统缓存（Standby Normal / Reserve / Core 合计）、纯空闲（Free & Zero Page List），各带占比条
+- **三种清理强度**（见下表）
+- **安全筛选**：前台进程、关键系统进程（`lsass`、`csrss`、`dwm`、`explorer` 等）一律跳过
+- **占用排行**：按进程名聚合，列出占内存最多的 5 个程序
+- **有据可查**：每次整理写入 `使用记录.log`，界面上显示"上次整理 / 让出多少"
+- **自动提权**：普通权限启动后点清理，会自动以管理员身份重启并继续执行上次点的模式
+- **崩溃可查**：`--windowed` 打包后 stderr 会被吞掉，所以异常同时写入 `启动错误.log` 并弹窗
+- **快捷键**：`Enter` / `空格` 标准整理，`Esc` 退出
+
+### 三种模式
+
+| 模式 | 清待命列表 | 压缩进程工作集 | 跳过有可见窗口的进程 |
+|---|---|---|---|
+| 轻度 | 是 | 否 | — |
+| 标准（默认） | 是 | 是 | 是 |
+| 深度 | 是 | 是 | 否 |
+
+所有模式都会跳过：前台窗口进程、系统关键进程、工作集小于 60 MB 的进程。
+
+---
+
+## 运行
+
+**要求**：Windows 10 / 11，Python 3.8+，需要管理员权限才能清待命列表。
+
+```bash
+python 内存整理加强版.py
+```
+
+双击 `.py` 也可以，用 pythonw 运行不会弹控制台：
+
+```bash
+pythonw 内存整理加强版.py
+```
+
+### 打包成 exe
+
+```bash
+pip install pyinstaller
+pyinstaller -F -w --uac-admin --name 内存整理 内存整理加强版.py
+```
+
+`--uac-admin` 让 exe 启动时就带管理员清单，避免运行到一半才提权。
+
+---
+
+## 工作原理（简短版）
+
+| 行为 | 调用 |
+|---|---|
+| 读物理内存总量与可用量 | `GlobalMemoryStatusEx` |
+| 读待命 / 已修改 / 空闲页数量 | PDH 计数器 `\Memory\...`（`PdhAddEnglishCounterW`） |
+| 刷已修改页 / 清低优先级待命 / 清待命列表 | `NtSetSystemInformation(SystemMemoryListInformation)` |
+| 设置特权（`SeProfileSingleProcessPrivilege` 等） | `AdjustTokenPrivileges`，需先判断 `ERROR_NOT_ALL_ASSIGNED` |
+| 压缩进程工作集 | `EmptyWorkingSet`（`psapi`） |
+| 枚举窗口判断前台/可见 | `EnumWindows` / `GetForegroundWindow` |
+| 提权重启 | `ShellExecuteW(..., "runas", ...)` |
+
+注意：`EmptyWorkingSet` 只是让页面离开工作集，它们会进入待命列表或页面文件。
+所以日志里写的是"转入缓存/页面文件"，不是"释放"。
+
+---
+
+## 它做不到什么（请先读这段）
+
+- **它不是性能优化器。** Windows 的内存管理器本身就在做这些事，手动清理多数时候只是让数字好看一点。
+- **清待命列表可能让之后更慢。** 缓存本来就是用来加速文件读取的，清掉后下次读盘要重新预热。
+- **"纯空闲"不是目标。** 空闲内存不会被利用，缓存多才是健康状态。
+- **效果是暂时的。** 只要程序还在跑，内存很快会再涨回去；这不是泄漏修复工具。
+- **不解决内存泄漏。** 某个程序持续涨内存，请去查它，而不是反复点清理。
+- **只在 Windows 上可用。** Win32 / ntdll / PDH 全部是 Windows 专有接口。
+
+如果清理后"纯空闲"没变化，工具会直接告诉你"本来就不缺可用内存，这次清了也白清"——
+这是设计意图，不是 bug。
+
+---
+
+## 文件
+
+| 文件 | 说明 |
+|---|---|
+| `内存整理加强版.py` | 全部代码，单文件 |
+| `使用记录.log` | 每次整理追加一行，与脚本/exe 同目录 |
+| `启动错误.log` | 崩溃堆栈，与脚本/exe 同目录 |
+
+两个日志都只写本地，不上传任何数据。
+
+---
